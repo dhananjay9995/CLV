@@ -9,9 +9,15 @@ from lifetimes.utils import summary_data_from_transaction_data
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import plotnine as pn
+from xgboost import XGBRegressor, XGBClassifier
+from sklearn.model_selection import GridSearchCV
+from lifetimes import BetaGeoFitter, GammaGammaFitter
+from lifetimes.plotting import plot_frequency_recency_matrix
 
 
 ##############################################################################################################
+#Data loading an Cleaning
+
 df = pd.read_csv("data/CDNOW_master.txt",sep="\s+",names=['customer_id', 'date', 'quantity', 'price'])
 
 df.head()
@@ -32,32 +38,26 @@ customer_stats = df.groupby('customer_id').agg({
 }).reset_index()
 
 
-df.groupby('customer_id')['quantity'].sum()
-
 customer_stats.columns = customer_stats.columns.droplevel()
 
 customer_stats.columns = ['customer_id', 'first_purchase_date', 'last_purchase_date', 'total_purchases', 'total_quantity', 'total_spending']
 customer_stats.sort_values(by='first_purchase_date',ascending=False)
+customer_stats.sort_values(by='last_purchase_date',ascending=False)             #no new customers were added after 25th march 1997,repeated customers
 
 # Calculate additional metrics such as average spending per purchase and average quantity per purchase
 customer_stats['avg_spending_per_purchase'] = customer_stats['total_spending'] / customer_stats['total_purchases']
+top20_customers = customer_stats.sort_values(by='total_spending',ascending=False).head(20)
 
-#customer_stats['avg_quantity_per_purchase'] = customer_stats['quantity'] / customer_stats[('date', 'count')]
+top20_customers_sorted = top20_customers.sort_values(by='total_spending', ascending=False)
 
-# Display the resulting DataFrame
-print(customer_stats.head())
-
-df[df.duplicated()]
-
-sns.boxplot(df['total_spending'])
+#vizualizing the top 20 customers who has spent the most
+sns.barplot(x='customer_id', y='total_spending', data=top20_customers_sorted,order=top20_customers_sorted['customer_id'])
+plt.xlabel('Customer ID')
+plt.ylabel('Total Spending')
+plt.title('Top 20 Customers by Total Spending')
+plt.xticks(rotation=45)  # Rotate x-axis labels for better readability
+plt.tight_layout()
 plt.show()
-
-df.sort_values(by='date',ascending=False)
-
-index_to_drop = df[df['total_spending'] ==  127314.99].index[0]
-df = df.drop(index=index_to_drop)
-df.sort_values(by='date',ascending=False)
-
 ##############################################################################################################
 #Monthly Spend Analysis
 
@@ -65,6 +65,7 @@ monthly_spend_df = df.copy()
 
 monthly_spend_df['Month'] = df['date'].dt.strftime('%b')
 
+#overall Spend Analysis for different months
 monthly_spending = monthly_spend_df.groupby('Month')['total_spending'].sum().reset_index()
 
 (
@@ -73,6 +74,17 @@ monthly_spending = monthly_spend_df.groupby('Month')['total_spending'].sum().res
     geom_bar(stat='identity')+
     xlab('Month')
 )
+
+#Spend Analysis for different months for the year 1997
+df_1997 = monthly_spend_df[monthly_spend_df['date'].dt.year == 1997]
+
+(
+    ggplot(df_1997)+
+    aes(x='reorder(Month, total_spending)',y='total_spending')+
+    geom_bar(stat='identity')+
+    xlab('Month')
+)
+
 ##############################################################################################################
 #RFM
 
@@ -96,7 +108,9 @@ rfm_table1 = rfm_table.reset_index()
 sns.heatmap(rfm_table.corr())
 plt.show()  #frequncy and monetary value have high correlation
 
-##############################################################################################################
+########################################
+
+## CLV Segmentation
 quartiles = rfm_table.quantile(q=[0.25, 0.5, 0.75])
 def rfm_segment(row):
     if row['recency(in days)'] <= quartiles['recency(in days)'][0.25]:
@@ -158,6 +172,13 @@ rfm_table1['Cust_Category'] = rfm_table1['RFM_Segment'].map(segment_mapping).fil
 
 rfm_table1['Cust_Category'].value_counts()
 
+sns.countplot(data = rfm_table1 , x = 'Cust_Category', color='skyblue')
+# Adding labels and title
+plt.xlabel('Customer Categories')
+plt.ylabel('Number of Customers')
+plt.title('Distribution of Customers by Category')
+plt.show()
+
 
 segment_analysis = rfm_table1.groupby('RFM_Segment').agg({
     'recency(in days)': 'mean',
@@ -187,7 +208,6 @@ age_table.rename(columns={
 #customer_dates['age'] = (customer_dates['max'] - customer_dates['min']).dt.days+1
 rfm_table1 = pd.merge(rfm_table1, age_table[['age']], left_on='customer_id', right_index=True, how='left')
 
-
 rfm_table1['avg_purchase_value'] = rfm_table1['monetary_value'] / rfm_table1['frequency']
 customer_lifespan = rfm_table1['recency(in days)'].max() - rfm_table1['recency(in days)'].min()
 rfm_table1['CLV'] = rfm_table1['avg_purchase_value'] * rfm_table1['frequency'] * customer_lifespan
@@ -205,11 +225,10 @@ def segment_clv(clv):
 rfm_table1['CLV_Segment'] = rfm_table1['CLV'].apply(segment_clv)
 
 
-rfm_table1.drop('predicted_clv1',axis=1,inplace=True)
+#rfm_table1.drop('age_x',axis=1,inplace=True)
 
 ##############################################################################################################
-from lifetimes import BetaGeoFitter, GammaGammaFitter
-from lifetimes.plotting import plot_frequency_recency_matrix
+#CLV prediction
 
 rfm_table1 = rfm_table1[rfm_table1['monetary_value'] > 0]
 
@@ -269,20 +288,10 @@ monetary_df=temporal_in_df[['customer_id','price']].groupby('customer_id').agg({
 
 features_df = pd.concat([recency_df,frequency_df,monetary_df],axis=1).merge(target_df, left_index=True, right_index =True, how="left").fillna(0)
 
-#visulazie top 20 customers spend 
-top_20 = features_df.head(20)
-top_20.reset_index(inplace=True)
-
-p = (ggplot(top_20)
-     + aes(x='customer_id', y='sum_price')
-     + geom_bar(stat='identity')
-     )
-
-print(p)
 ##############################################################################################################
 # prediction model
-from xgboost import XGBRegressor, XGBClassifier
-from sklearn.model_selection import GridSearchCV
+
+features_df.rename(columns={0: 'recency'}, inplace=True)
 
 X= features_df[['recency','frequency','sum_price','mean_price']]
 y= features_df[['price']]
@@ -313,12 +322,12 @@ reg_model.best_params_
 
 predicted_90_days_price = reg_model.predict(X)
 
-df_predicted_100_days_price = pd.DataFrame(predicted_100_days_price,columns=['predicted_100_days_price'])
+df_predicted_90_days_price = pd.DataFrame(predicted_90_days_price,columns=['predicted_90_days_price'])
 
 
 features_df['predicted_90_days_price'] = predicted_90_days_price.tolist()
 
-#PREDICTION OF whether they will spend in next 90 days
+#PREDICTION OF whether they will spend or not in next 90 days
 
 y_class= features_df['spend_90_flag']
 
@@ -357,5 +366,5 @@ prediction_df.head(40)
 
 
 
-##################################
+##########################################################################################################################################################################
 
